@@ -7,6 +7,7 @@ from openai import OpenAI
 from docx import Document
 from io import BytesIO
 import json
+import re
 
 # Load your API Key
 load_dotenv()
@@ -66,7 +67,20 @@ if uploaded_file:
             )
 
             try:
-                processes = json.loads(response.choices[0].message.content)
+                # Extract JSON from the response - handle cases where GPT adds extra text
+                response_text = response.choices[0].message.content
+                
+                # Try to find JSON array in the response
+                import re
+                json_match = re.search(r'\[\s*\{.*\}\s*\]', response_text, re.DOTALL)
+                
+                if json_match:
+                    json_text = json_match.group()
+                    processes = json.loads(json_text)
+                else:
+                    # Try parsing the entire response as JSON
+                    processes = json.loads(response_text)
+                
                 program_processes[program_name] = processes
                 
                 # Display processes for this program
@@ -75,10 +89,21 @@ if uploaded_file:
                         st.write(f"**{proc['process_name']}** ({proc['process_type']})")
                         st.write(f"   {proc['description']}")
                 
-            except json.JSONDecodeError:
-                # Fallback if JSON parsing fails
-                st.warning(f"Could not parse processes for {program_name}")
-                program_processes[program_name] = []
+            except (json.JSONDecodeError, KeyError) as e:
+                # Fallback: try to extract process information manually
+                st.warning(f"JSON parsing failed for {program_name}, using fallback method")
+                
+                # Simple fallback - just store the raw text
+                fallback_processes = [{
+                    "process_name": "Process extraction failed",
+                    "description": "Unable to parse structured process data. Raw response saved.",
+                    "process_type": "Unknown"
+                }]
+                program_processes[program_name] = fallback_processes
+                
+                # Still show what we got
+                with st.expander(f"Processes for {program_name} (Raw)"):
+                    st.text(response.choices[0].message.content)
             
             progress_bar.progress((i+1)/len(df))
 
