@@ -12,6 +12,8 @@ import plotly.graph_objects as go
 import plotly.express as px
 from collections import defaultdict
 import networkx as nx
+import time
+from datetime import datetime, timedelta
 
 # Load your API Key
 load_dotenv()
@@ -23,6 +25,10 @@ TYLER_BLUE = "#003F87"
 TYLER_LIGHT_BLUE = "#0075C9"
 TYLER_GRAY = "#6C757D"
 TYLER_DARK_GRAY = "#333333"
+
+# Batch processing configuration
+BATCH_SIZE = 50  # Process 50 programs at a time
+SAVE_INTERVAL = 10  # Save progress every 10 programs
 
 # Helper functions for visualizations
 def analyze_process_overlaps(program_processes):
@@ -363,6 +369,28 @@ def create_excel_file(program_processes, overlap_analysis, analyses, process_ove
     bio.seek(0)
     return bio
 
+def save_progress(progress_data):
+    """Save progress to session state"""
+    st.session_state.saved_progress = progress_data
+    st.session_state.last_save = datetime.now()
+
+def load_progress():
+    """Load progress from session state"""
+    if 'saved_progress' in st.session_state:
+        return st.session_state.saved_progress
+    return None
+
+def estimate_time_remaining(processed, total, elapsed_time):
+    """Estimate time remaining based on current progress"""
+    if processed == 0:
+        return "Calculating..."
+    
+    avg_time_per_item = elapsed_time / processed
+    remaining_items = total - processed
+    estimated_seconds = avg_time_per_item * remaining_items
+    
+    return str(timedelta(seconds=int(estimated_seconds)))
+
 # Custom CSS for Tyler Technologies branding
 st.markdown("""
 <style>
@@ -450,6 +478,15 @@ st.markdown("""
     .stTabs [aria-selected="true"] {
         color: #0075C9;
     }
+    
+    /* Progress info box */
+    .progress-info {
+        background-color: #f0f8ff;
+        border: 1px solid #0075C9;
+        border-radius: 5px;
+        padding: 10px;
+        margin: 10px 0;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -468,6 +505,10 @@ if 'analyses' not in st.session_state:
     st.session_state.analyses = []
 if 'process_overlap_data' not in st.session_state:
     st.session_state.process_overlap_data = {}
+if 'current_batch' not in st.session_state:
+    st.session_state.current_batch = 0
+if 'processing_complete' not in st.session_state:
+    st.session_state.processing_complete = False
 
 uploaded_file = st.file_uploader("Upload Excel Spreadsheet of Programs", type=['xlsx'])
 
@@ -475,99 +516,149 @@ if uploaded_file:
     df = pd.read_excel(uploaded_file)
     st.success("File uploaded successfully!")
     st.dataframe(df)
+    
+    total_programs = len(df)
+    st.info(f"Total programs to analyze: {total_programs}")
+    
+    # Check for saved progress
+    saved_progress = load_progress()
+    if saved_progress and not st.session_state.processing_complete:
+        st.warning("Previous analysis was interrupted. Would you like to resume?")
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("Resume Previous Analysis"):
+                st.session_state.program_processes = saved_progress.get('program_processes', {})
+                st.session_state.current_batch = saved_progress.get('current_batch', 0)
+                st.session_state.analyses = saved_progress.get('analyses', [])
+        with col2:
+            if st.button("Start Fresh"):
+                st.session_state.program_processes = {}
+                st.session_state.current_batch = 0
+                st.session_state.analyses = []
+                st.session_state.saved_progress = None
 
-    if st.button("Analyze Programs and Find Process Overlaps"):
-        # First, collect all processes for each program
-        program_processes = {}
+    if st.button("Analyze Programs and Find Process Overlaps") or (saved_progress and st.session_state.current_batch > 0):
+        # Start timing
+        start_time = time.time()
+        
+        # Batch processing setup
+        total_batches = (total_programs + BATCH_SIZE - 1) // BATCH_SIZE
+        
+        # Progress tracking
+        progress_container = st.container()
         progress_text = st.empty()
         progress_bar = st.progress(0)
-
+        time_info = st.empty()
+        
+        # Phase 1: Process programs in batches
         st.header("Phase 1: Identifying Key Processes")
         
-        for i, row in df.iterrows():
-            program_name = row['Program']
-            program_description = row['Description']
+        # Process from current batch to end
+        for batch_num in range(st.session_state.current_batch, total_batches):
+            batch_start = batch_num * BATCH_SIZE
+            batch_end = min(batch_start + BATCH_SIZE, total_programs)
             
-            progress_text.text(f"Identifying processes for '{program_name}' ({i+1}/{len(df)})")
-
-            # First prompt: Extract key processes only
-            process_prompt = f"""
-            Analyze the following government program and identify its KEY PROCESSES.
-
-            Program: {program_name}
-            Description: {program_description}
-
-            List the major processes within this program. For each process:
-            1. Give it a clear, concise name
-            2. Provide a brief description (1-2 sentences)
-            3. Identify the process type (e.g., Application Processing, Data Management, Customer Service, Financial Management, Compliance Monitoring, etc.)
-
-            Format your response as a JSON array like this:
-            [
-                {{
-                    "process_name": "Process Name",
-                    "description": "Brief description",
-                    "process_type": "Type of process"
-                }},
-                ...
-            ]
-            """
-
-            response = client.chat.completions.create(
-                model="gpt-4o",
-                messages=[{"role": "user", "content": process_prompt}],
-                temperature=0.3
-            )
-
-            try:
-                # Extract JSON from the response - handle cases where GPT adds extra text
-                response_text = response.choices[0].message.content
-                
-                # Try to find JSON array in the response
-                json_match = re.search(r'\[\s*\{.*\}\s*\]', response_text, re.DOTALL)
-                
-                if json_match:
-                    json_text = json_match.group()
-                    processes = json.loads(json_text)
-                else:
-                    # Try parsing the entire response as JSON
-                    processes = json.loads(response_text)
-                
-                program_processes[program_name] = processes
-                
-                # Display processes for this program
-                with st.expander(f"Processes for {program_name}"):
-                    for proc in processes:
-                        st.write(f"**{proc['process_name']}** ({proc['process_type']})")
-                        st.write(f"   {proc['description']}")
-                
-            except (json.JSONDecodeError, KeyError) as e:
-                # Fallback: try to extract process information manually
-                st.warning(f"JSON parsing failed for {program_name}, using fallback method")
-                
-                # Simple fallback - just store the raw text
-                fallback_processes = [{
-                    "process_name": "Process extraction failed",
-                    "description": "Unable to parse structured process data. Raw response saved.",
-                    "process_type": "Unknown"
-                }]
-                program_processes[program_name] = fallback_processes
-                
-                # Still show what we got
-                with st.expander(f"Processes for {program_name} (Raw)"):
-                    st.text(response.choices[0].message.content)
+            st.subheader(f"Processing Batch {batch_num + 1} of {total_batches}")
+            batch_info = st.info(f"Programs {batch_start + 1} to {batch_end} of {total_programs}")
             
-            progress_bar.progress((i+1)/len(df))
+            # Process programs in this batch
+            for idx in range(batch_start, batch_end):
+                row = df.iloc[idx]
+                program_name = row['Program']
+                program_description = row['Description']
+                
+                # Skip if already processed
+                if program_name in st.session_state.program_processes:
+                    continue
+                
+                # Update progress
+                overall_progress = (idx + 1) / total_programs
+                progress_bar.progress(overall_progress)
+                progress_text.text(f"Processing '{program_name}' ({idx + 1}/{total_programs})")
+                
+                # Update time estimate
+                elapsed = time.time() - start_time
+                time_remaining = estimate_time_remaining(idx - batch_start + 1, total_programs - batch_start, elapsed)
+                time_info.text(f"Elapsed: {str(timedelta(seconds=int(elapsed)))} | Estimated remaining: {time_remaining}")
+                
+                # Process program
+                process_prompt = f"""
+                Analyze the following government program and identify its KEY PROCESSES.
 
-        st.success("Process identification complete!")
+                Program: {program_name}
+                Description: {program_description}
 
-        # Create process overlap analysis data
-        process_overlap_data = analyze_process_overlaps(program_processes)
+                List the major processes within this program. For each process:
+                1. Give it a clear, concise name
+                2. Provide a brief description (1-2 sentences)
+                3. Identify the process type (e.g., Application Processing, Data Management, Customer Service, Financial Management, Compliance Monitoring, etc.)
+
+                Format your response as a JSON array like this:
+                [
+                    {{
+                        "process_name": "Process Name",
+                        "description": "Brief description",
+                        "process_type": "Type of process"
+                    }},
+                    ...
+                ]
+                """
+
+                try:
+                    response = client.chat.completions.create(
+                        model="gpt-4o",
+                        messages=[{"role": "user", "content": process_prompt}],
+                        temperature=0.3
+                    )
+
+                    # Extract JSON from response
+                    response_text = response.choices[0].message.content
+                    json_match = re.search(r'\[\s*\{.*\}\s*\]', response_text, re.DOTALL)
+                    
+                    if json_match:
+                        json_text = json_match.group()
+                        processes = json.loads(json_text)
+                    else:
+                        processes = json.loads(response_text)
+                    
+                    st.session_state.program_processes[program_name] = processes
+                    
+                    # Display processes
+                    with st.expander(f"Processes for {program_name}"):
+                        for proc in processes:
+                            st.write(f"**{proc['process_name']}** ({proc['process_type']})")
+                            st.write(f"   {proc['description']}")
+                    
+                except Exception as e:
+                    st.warning(f"Error processing {program_name}: {str(e)}")
+                    st.session_state.program_processes[program_name] = [{
+                        "process_name": "Process extraction failed",
+                        "description": "Unable to parse structured process data.",
+                        "process_type": "Unknown"
+                    }]
+                
+                # Save progress periodically
+                if (idx + 1) % SAVE_INTERVAL == 0:
+                    save_progress({
+                        'program_processes': st.session_state.program_processes,
+                        'current_batch': batch_num,
+                        'analyses': st.session_state.analyses
+                    })
+                    st.info(f"Progress saved at program {idx + 1}")
+            
+            # Update current batch
+            st.session_state.current_batch = batch_num + 1
+            batch_info.empty()
         
-        # Store results in session state
-        st.session_state.analysis_complete = True
-        st.session_state.program_processes = program_processes
-        st.session_state.process_overlap_data = process_overlap_data
+        st.success("Process identification complete!")
+        
+        # Phase 2: Overlap Analysis
+        st.header("Phase 2: Analyzing Process Overlaps")
+        
+        with st.spinner("Analyzing process overlaps across all programs..."):
+            # Create process overlap analysis data
+            process_overlap_data = analyze_process_overlaps(st.session_state.program_processes)
+            st.session_state.process_overlap_data = process_overlap_data
         
         # Visualizations
         st.header("Process Overlap Visualizations")
@@ -576,26 +667,27 @@ if uploaded_file:
         tab1, tab2, tab3, tab4 = st.tabs(["Overlap Matrix", "Process Type Distribution", "Network Graph", "Cross-Department Analysis"])
         
         with tab1:
-            create_overlap_matrix(process_overlap_data, program_processes)
+            create_overlap_matrix(process_overlap_data, st.session_state.program_processes)
         
         with tab2:
-            create_process_type_chart(program_processes)
+            create_process_type_chart(st.session_state.program_processes)
             
         with tab3:
-            create_network_graph(process_overlap_data, program_processes)
+            create_network_graph(process_overlap_data, st.session_state.program_processes)
             
         with tab4:
-            create_cross_department_analysis(process_overlap_data, program_processes)
-
-        # Phase 2: Analyze overlaps
-        st.header("Phase 2: Analyzing Process Overlaps")
+            create_cross_department_analysis(process_overlap_data, st.session_state.program_processes)
         
-        # Prepare data for overlap analysis
+        # Generate overlap analysis text
         all_processes_text = ""
-        for program, processes in program_processes.items():
+        for program, processes in st.session_state.program_processes.items():
             all_processes_text += f"\n\nProgram: {program}\n"
             for proc in processes:
                 all_processes_text += f"- {proc['process_name']} ({proc['process_type']}): {proc['description']}\n"
+
+        # Truncate if too long for API
+        if len(all_processes_text) > 50000:
+            all_processes_text = all_processes_text[:50000] + "\n\n[Content truncated due to length...]"
 
         overlap_prompt = f"""
         Analyze the following processes from multiple government programs and identify opportunities for consolidation or centralization.
@@ -614,102 +706,148 @@ if uploaded_file:
         Be specific about which programs share which processes and how they could be consolidated.
         """
 
-        overlap_response = client.chat.completions.create(
-            model="gpt-4o",
-            messages=[{"role": "user", "content": overlap_prompt}],
-            temperature=0.5
-        )
-
-        overlap_analysis = overlap_response.choices[0].message.content
-        st.session_state.overlap_analysis = overlap_analysis
+        with st.spinner("Generating comprehensive overlap analysis..."):
+            overlap_response = client.chat.completions.create(
+                model="gpt-4o",
+                messages=[{"role": "user", "content": overlap_prompt}],
+                temperature=0.5
+            )
+            
+            overlap_analysis = overlap_response.choices[0].message.content
+            st.session_state.overlap_analysis = overlap_analysis
         
         st.header("Process Overlap Analysis")
         st.markdown(overlap_analysis)
-
-        # Phase 3: Generate individual program analyses
+        
+        # Phase 3: Individual analyses in batches
         st.header("Phase 3: Individual Program Efficiency Analyses")
         
-        analyses = []
-        progress_text.text("Generating detailed analyses...")
-        progress_bar.progress(0)
-
-        for i, row in df.iterrows():
-            program_name = row['Program']
-            program_description = row['Description']
-            
-            progress_text.text(f"Analyzing '{program_name}' ({i+1}/{len(df)})")
-
-            # Include the identified processes in the analysis
-            processes_text = ""
-            if program_name in program_processes:
-                processes_text = "\n".join([f"- {p['process_name']}: {p['description']}" for p in program_processes[program_name]])
-
-            analysis_prompt = f"""
-            You're analyzing a local government program called '{program_name}' for efficiency and cost savings.
-
-            Program description:
-            {program_description}
-
-            Key Processes already identified:
-            {processes_text}
-
-            Provide a clearly structured analysis including these sections:
-
-            1. Current State Assessment
-            2. Areas to Analyze for Efficiency Opportunities
-            3. Key Processes within this Program (use the processes identified above and expand if needed)
-            4. Types of Recommendations (Streamlining, Automation, Staffing, Fees, Policy, Customer Service enhancements)
-            5. Ideal Efficiency Metrics (suggest measurable metrics for tracking improvements)
-            6. Anticipated Outcomes and Benefits
-
-            Clearly organize your response into these sections.
-            """
-
-            response = client.chat.completions.create(
-                model="gpt-4o",
-                messages=[{"role": "user", "content": analysis_prompt}],
-                temperature=0.5
-            )
-
-            analysis = response.choices[0].message.content
-            analyses.append({'Program': program_name, 'Analysis': analysis})
-            progress_bar.progress((i+1)/len(df))
-
-        st.success("All analyses generated!")
+        analysis_progress = st.progress(0)
+        analysis_text = st.empty()
         
-        # Store results in session state
-        st.session_state.analyses = analyses
+        # Process analyses in batches
+        for batch_num in range(0, total_batches):
+            batch_start = batch_num * BATCH_SIZE
+            batch_end = min(batch_start + BATCH_SIZE, total_programs)
+            
+            st.subheader(f"Analyzing Batch {batch_num + 1} of {total_batches}")
+            
+            for idx in range(batch_start, batch_end):
+                row = df.iloc[idx]
+                program_name = row['Program']
+                
+                # Skip if already analyzed
+                if any(a['Program'] == program_name for a in st.session_state.analyses):
+                    continue
+                
+                program_description = row['Description']
+                
+                analysis_progress.progress((idx + 1) / total_programs)
+                analysis_text.text(f"Analyzing '{program_name}' ({idx + 1}/{total_programs})")
+                
+                # Get processes for this program
+                processes_text = ""
+                if program_name in st.session_state.program_processes:
+                    processes_text = "\n".join([f"- {p['process_name']}: {p['description']}" 
+                                               for p in st.session_state.program_processes[program_name]])
+
+                analysis_prompt = f"""
+                You're analyzing a local government program called '{program_name}' for efficiency and cost savings.
+
+                Program description:
+                {program_description}
+
+                Key Processes already identified:
+                {processes_text}
+
+                Provide a clearly structured analysis including these sections:
+
+                1. Current State Assessment
+                2. Areas to Analyze for Efficiency Opportunities
+                3. Key Processes within this Program (use the processes identified above and expand if needed)
+                4. Types of Recommendations (Streamlining, Automation, Staffing, Fees, Policy, Customer Service enhancements)
+                5. Ideal Efficiency Metrics (suggest measurable metrics for tracking improvements)
+                6. Anticipated Outcomes and Benefits
+
+                Clearly organize your response into these sections.
+                """
+
+                try:
+                    response = client.chat.completions.create(
+                        model="gpt-4o",
+                        messages=[{"role": "user", "content": analysis_prompt}],
+                        temperature=0.5
+                    )
+
+                    analysis = response.choices[0].message.content
+                    st.session_state.analyses.append({'Program': program_name, 'Analysis': analysis})
+                    
+                except Exception as e:
+                    st.warning(f"Error analyzing {program_name}: {str(e)}")
+                    st.session_state.analyses.append({
+                        'Program': program_name, 
+                        'Analysis': f"Analysis failed: {str(e)}"
+                    })
+                
+                # Save progress
+                if (idx + 1) % SAVE_INTERVAL == 0:
+                    save_progress({
+                        'program_processes': st.session_state.program_processes,
+                        'current_batch': st.session_state.current_batch,
+                        'analyses': st.session_state.analyses
+                    })
+        
+        st.success("All analyses generated!")
+        st.session_state.analysis_complete = True
+        st.session_state.processing_complete = True
+        
+        # Clear saved progress
+        if 'saved_progress' in st.session_state:
+            del st.session_state.saved_progress
 
     # Display results if analysis is complete
     if st.session_state.analysis_complete:
         # Display individual analyses
         st.header("Individual Program Analyses")
-        for item in st.session_state.analyses:
+        
+        # Add search/filter capability for large results
+        search_term = st.text_input("Search programs:", "")
+        filtered_analyses = [a for a in st.session_state.analyses 
+                           if search_term.lower() in a['Program'].lower()]
+        
+        st.info(f"Showing {len(filtered_analyses)} of {len(st.session_state.analyses)} analyses")
+        
+        for item in filtered_analyses[:50]:  # Show first 50 to avoid UI overload
             with st.expander(f"Analysis for {item['Program']}"):
                 st.markdown(item['Analysis'])
+        
+        if len(filtered_analyses) > 50:
+            st.warning(f"Showing first 50 results. Use search to find specific programs or download full report.")
 
-        # Download section - always available after analysis
+        # Download section
         st.markdown("---")
         st.header("Download Reports")
         
         col1, col2 = st.columns(2)
         
         with col1:
-            word_file = create_word_doc(st.session_state.program_processes, 
-                                       st.session_state.overlap_analysis, 
-                                       st.session_state.analyses, 
-                                       st.session_state.process_overlap_data)
-            st.download_button("Download Complete Word Report", 
-                             word_file, 
-                             "Program_Process_Analysis_Report.docx",
-                             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+            with st.spinner("Generating Word document..."):
+                word_file = create_word_doc(st.session_state.program_processes, 
+                                           st.session_state.overlap_analysis, 
+                                           st.session_state.analyses, 
+                                           st.session_state.process_overlap_data)
+                st.download_button("Download Complete Word Report", 
+                                 word_file, 
+                                 "Program_Process_Analysis_Report.docx",
+                                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
 
         with col2:
-            excel_file = create_excel_file(st.session_state.program_processes, 
-                                         st.session_state.overlap_analysis, 
-                                         st.session_state.analyses, 
-                                         st.session_state.process_overlap_data)
-            st.download_button("Download Complete Excel Report", 
-                             excel_file, 
-                             "Program_Process_Analysis_Report.xlsx",
-                             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            with st.spinner("Generating Excel document..."):
+                excel_file = create_excel_file(st.session_state.program_processes, 
+                                             st.session_state.overlap_analysis, 
+                                             st.session_state.analyses, 
+                                             st.session_state.process_overlap_data)
+                st.download_button("Download Complete Excel Report", 
+                                 excel_file, 
+                                 "Program_Process_Analysis_Report.xlsx",
+                                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
