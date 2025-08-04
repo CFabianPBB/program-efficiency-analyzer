@@ -47,7 +47,7 @@ if uploaded_file:
             List the major processes within this program. For each process:
             1. Give it a clear, concise name
             2. Provide a brief description (1-2 sentences)
-            3. Identify the process type (e.g., Application Processing, Data Management, Customer Service, Financial Management, Compliance Monitoring, etc.)
+            3. Identify the process type (e.g., Inspection, Document Review, Application Processing, Data Management, Customer Service, Financial Management, Compliance Monitoring, etc.)
 
             Format your response as a JSON array like this:
             [
@@ -137,7 +137,7 @@ if uploaded_file:
         """
 
         overlap_response = client.chat.completions.create(
-            model="gpt-4-turbo",
+            model="gpt-4o",
             messages=[{"role": "user", "content": overlap_prompt}],
             temperature=0.5
         )
