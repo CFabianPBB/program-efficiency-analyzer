@@ -1,4 +1,8 @@
-import streamlit as st
+# Tyler Technologies brand colors
+TYLER_BLUE = "#003F87"
+TYLER_LIGHT_BLUE = "#0075C9"
+TYLER_GRAY = "#6C757D"
+TYLER_DARK_GRAY = "#333333"import streamlit as st
 import pandas as pd
 import openai
 import os
@@ -17,6 +21,254 @@ import networkx as nx
 load_dotenv()
 api_key = os.getenv("OPENAI_API_KEY")
 client = OpenAI(api_key=api_key)
+
+# Tyler Technologies brand colors
+TYLER_BLUE = "#003F87"
+TYLER_LIGHT_BLUE = "#0075C9"
+TYLER_GRAY = "#6C757D"
+TYLER_DARK_GRAY = "#333333"
+
+# Helper functions for visualizations
+def analyze_process_overlaps(program_processes):
+    """Analyze overlaps between programs based on process types and names"""
+    overlap_data = {}
+    programs = list(program_processes.keys())
+    
+    for i, prog1 in enumerate(programs):
+        for j, prog2 in enumerate(programs):
+            if i < j:  # Only compare each pair once
+                processes1 = program_processes[prog1]
+                processes2 = program_processes[prog2]
+                
+                # Find matching process types
+                types1 = set(p['process_type'] for p in processes1)
+                types2 = set(p['process_type'] for p in processes2)
+                common_types = types1.intersection(types2)
+                
+                # Calculate similarity score
+                total_types = len(types1.union(types2))
+                similarity_score = len(common_types) / total_types if total_types > 0 else 0
+                
+                # Find similar processes
+                matching_processes = []
+                for p1 in processes1:
+                    for p2 in processes2:
+                        if p1['process_type'] == p2['process_type']:
+                            matching_processes.append({
+                                'process_type': p1['process_type'],
+                                'process1': p1['process_name'],
+                                'process2': p2['process_name']
+                            })
+                
+                overlap_data[(prog1, prog2)] = {
+                    'common_types': list(common_types),
+                    'similarity_score': similarity_score,
+                    'matching_processes': matching_processes
+                }
+    
+    return overlap_data
+
+def create_overlap_matrix(overlap_data, program_processes):
+    """Create a heatmap showing process overlap between programs"""
+    programs = list(program_processes.keys())
+    n_programs = len(programs)
+    
+    # Create similarity matrix
+    matrix = [[0] * n_programs for _ in range(n_programs)]
+    
+    for i, prog1 in enumerate(programs):
+        matrix[i][i] = 1.0  # Self-similarity is 1
+        for j, prog2 in enumerate(programs):
+            if i < j:
+                key = (prog1, prog2)
+                if key in overlap_data:
+                    similarity = overlap_data[key]['similarity_score']
+                    matrix[i][j] = similarity
+                    matrix[j][i] = similarity
+    
+    # Create heatmap
+    fig = go.Figure(data=go.Heatmap(
+        z=matrix,
+        x=programs,
+        y=programs,
+        colorscale=[[0, '#FFFFFF'], [0.5, TYLER_LIGHT_BLUE], [1, TYLER_BLUE]],
+        text=[[f'{val:.2f}' for val in row] for row in matrix],
+        texttemplate='%{text}',
+        textfont={"size": 10},
+        colorbar=dict(title="Similarity Score")
+    ))
+    
+    fig.update_layout(
+        title="Process Overlap Matrix",
+        xaxis_title="Programs",
+        yaxis_title="Programs",
+        height=600,
+        xaxis={'tickangle': -45}
+    )
+    
+    st.plotly_chart(fig, use_container_width=True)
+
+def create_process_type_chart(program_processes):
+    """Create a bar chart showing distribution of process types"""
+    process_type_counts = defaultdict(int)
+    
+    for program, processes in program_processes.items():
+        for process in processes:
+            process_type_counts[process['process_type']] += 1
+    
+    # Convert to dataframe
+    df = pd.DataFrame([
+        {'Process Type': ptype, 'Count': count}
+        for ptype, count in process_type_counts.items()
+    ])
+    df = df.sort_values('Count', ascending=False)
+    
+    # Create bar chart
+    fig = px.bar(df, x='Process Type', y='Count',
+                 color='Count',
+                 color_continuous_scale=[TYLER_LIGHT_BLUE, TYLER_BLUE],
+                 title="Distribution of Process Types Across Programs")
+    
+    fig.update_layout(
+        xaxis_tickangle=-45,
+        height=500,
+        showlegend=False
+    )
+    
+    st.plotly_chart(fig, use_container_width=True)
+
+def create_network_graph(overlap_data, program_processes):
+    """Create a network graph showing program connections based on process overlap"""
+    # Create network graph
+    G = nx.Graph()
+    
+    # Add nodes (programs)
+    programs = list(program_processes.keys())
+    for program in programs:
+        G.add_node(program)
+    
+    # Add edges based on similarity
+    edge_trace_list = []
+    
+    for (prog1, prog2), data in overlap_data.items():
+        if data['similarity_score'] > 0.3:  # Only show significant overlaps
+            G.add_edge(prog1, prog2, weight=data['similarity_score'])
+    
+    # Get positions for nodes
+    pos = nx.spring_layout(G, k=3, iterations=50)
+    
+    # Create edge traces
+    for edge in G.edges(data=True):
+        x0, y0 = pos[edge[0]]
+        x1, y1 = pos[edge[1]]
+        weight = edge[2]['weight']
+        
+        edge_trace = go.Scatter(
+            x=[x0, x1, None],
+            y=[y0, y1, None],
+            line=dict(width=weight*5, color=TYLER_LIGHT_BLUE),
+            hoverinfo='none',
+            mode='lines'
+        )
+        edge_trace_list.append(edge_trace)
+    
+    # Create node trace
+    node_x = []
+    node_y = []
+    node_text = []
+    
+    for node in G.nodes():
+        x, y = pos[node]
+        node_x.append(x)
+        node_y.append(y)
+        node_text.append(node)
+    
+    node_trace = go.Scatter(
+        x=node_x,
+        y=node_y,
+        mode='markers+text',
+        text=node_text,
+        textposition="top center",
+        hoverinfo='text',
+        marker=dict(
+            size=30,
+            color=TYLER_BLUE,
+            line_width=2,
+            line_color='white'
+        )
+    )
+    
+    # Create figure
+    fig = go.Figure(data=edge_trace_list + [node_trace])
+    
+    fig.update_layout(
+        title="Program Process Overlap Network",
+        showlegend=False,
+        hovermode='closest',
+        margin=dict(b=20,l=5,r=5,t=40),
+        xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+        yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+        height=600
+    )
+    
+    st.plotly_chart(fig, use_container_width=True)
+
+def create_cross_department_analysis(overlap_data, program_processes):
+    """Create analysis of cross-departmental process overlaps"""
+    # Identify which programs might be in different departments
+    # This is a simplified analysis - in real use, you'd have department info
+    
+    cross_dept_overlaps = []
+    
+    for (prog1, prog2), data in overlap_data.items():
+        if data['similarity_score'] > 0.5:
+            for process_match in data['matching_processes']:
+                cross_dept_overlaps.append({
+                    'Program 1': prog1,
+                    'Program 2': prog2,
+                    'Process Type': process_match['process_type'],
+                    'Similarity': data['similarity_score']
+                })
+    
+    if cross_dept_overlaps:
+        df = pd.DataFrame(cross_dept_overlaps)
+        
+        # Create grouped bar chart
+        fig = px.bar(df, x='Process Type', color='Similarity',
+                     title="High-Similarity Process Types Across Programs",
+                     color_continuous_scale=[TYLER_LIGHT_BLUE, TYLER_BLUE])
+        
+        fig.update_layout(
+            xaxis_tickangle=-45,
+            height=500
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Show detailed table
+        st.subheader("Detailed Cross-Program Process Overlaps")
+        st.dataframe(df.sort_values('Similarity', ascending=False))
+    else:
+        st.info("No significant cross-program overlaps detected.")
+
+def create_overlap_matrix_data(overlap_data, program_processes):
+    """Create a dataframe for the overlap matrix"""
+    programs = list(program_processes.keys())
+    matrix_data = {}
+    
+    for prog in programs:
+        matrix_data[prog] = {}
+        for other_prog in programs:
+            if prog == other_prog:
+                matrix_data[prog][other_prog] = 1.0
+            else:
+                key = (prog, other_prog) if (prog, other_prog) in overlap_data else (other_prog, prog)
+                if key in overlap_data:
+                    matrix_data[prog][other_prog] = overlap_data[key]['similarity_score']
+                else:
+                    matrix_data[prog][other_prog] = 0.0
+    
+    return pd.DataFrame(matrix_data)
 
 # Tyler Technologies brand colors
 TYLER_BLUE = "#003F87"
@@ -129,7 +381,7 @@ if uploaded_file:
             List the major processes within this program. For each process:
             1. Give it a clear, concise name
             2. Provide a brief description (1-2 sentences)
-            3. Identify the process type (e.g., Application Processing, Data Management, Customer Service, Financial Management, Compliance Monitoring, etc.)
+            3. Identify the process type (e.g., Application Processing, Inspection, Equipment Repair or Maintenance, Payment Processing, Data Management, Customer Service, Financial Management, Compliance Monitoring, etc.)
 
             Format your response as a JSON array like this:
             [
