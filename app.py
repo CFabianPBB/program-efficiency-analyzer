@@ -266,9 +266,112 @@ def create_overlap_matrix_data(overlap_data, program_processes):
     
     return pd.DataFrame(matrix_data)
 
+def create_word_doc(program_processes, overlap_analysis, analyses, process_overlap_data):
+    doc = Document()
+    doc.add_heading('Program Process Analysis Report', 0)
+    
+    # Add process overlap analysis first
+    doc.add_heading('Process Overlap Analysis', level=1)
+    doc.add_paragraph(overlap_analysis)
+    doc.add_page_break()
+    
+    # Add process summary
+    doc.add_heading('Process Summary by Program', level=1)
+    for program, processes in program_processes.items():
+        doc.add_heading(program, level=2)
+        for proc in processes:
+            doc.add_paragraph(f"• {proc['process_name']} ({proc['process_type']})")
+            doc.add_paragraph(f"  {proc['description']}", style='Normal')
+    doc.add_page_break()
+    
+    # Add individual analyses
+    doc.add_heading('Individual Program Efficiency Analyses', level=1)
+    for item in analyses:
+        doc.add_heading(item['Program'], level=2)
+        doc.add_paragraph(item['Analysis'])
+        doc.add_page_break()
+    
+    bio = BytesIO()
+    doc.save(bio)
+    bio.seek(0)
+    return bio
+
+def create_excel_file(program_processes, overlap_analysis, analyses, process_overlap_data):
+    bio = BytesIO()
+    with pd.ExcelWriter(bio, engine='openpyxl') as writer:
+        # Sheet 1: Process Summary
+        process_data = []
+        for program, processes in program_processes.items():
+            for proc in processes:
+                process_data.append({
+                    'Program': program,
+                    'Process Name': proc['process_name'],
+                    'Process Type': proc['process_type'],
+                    'Description': proc['description']
+                })
+        
+        if process_data:
+            process_df = pd.DataFrame(process_data)
+            process_df.to_excel(writer, index=False, sheet_name='Process Summary')
+        
+        # Sheet 2: Process Overlap Matrix
+        overlap_matrix_df = create_overlap_matrix_data(process_overlap_data, program_processes)
+        overlap_matrix_df.to_excel(writer, sheet_name='Process Overlap Matrix')
+        
+        # Sheet 3: Overlap Details
+        overlap_details = []
+        for (prog1, prog2), similarity_data in process_overlap_data.items():
+            if similarity_data['similarity_score'] > 0.3:  # Threshold for relevance
+                for match in similarity_data['matching_processes']:
+                    overlap_details.append({
+                        'Program 1': prog1,
+                        'Program 2': prog2,
+                        'Process Type': match['process_type'],
+                        'Process 1': match['process1'],
+                        'Process 2': match['process2'],
+                        'Similarity Score': round(similarity_data['similarity_score'], 2),
+                        'Consolidation Opportunity': 'High' if similarity_data['similarity_score'] > 0.7 else 'Medium'
+                    })
+        
+        if overlap_details:
+            overlap_details_df = pd.DataFrame(overlap_details)
+            overlap_details_df.to_excel(writer, index=False, sheet_name='Overlap Details')
+        
+        # Sheet 4: Overlap Analysis Text
+        overlap_df = pd.DataFrame([{'Overlap Analysis': overlap_analysis}])
+        overlap_df.to_excel(writer, index=False, sheet_name='Overlap Analysis')
+        
+        # Sheet 5: Individual Analyses
+        analyses_df = pd.DataFrame(analyses)
+        analyses_df.to_excel(writer, index=False, sheet_name='Program Analyses')
+        
+        # Auto-adjust column widths
+        for sheet_name in writer.sheets:
+            worksheet = writer.sheets[sheet_name]
+            for column in worksheet.columns:
+                max_length = 0
+                column_letter = column[0].column_letter
+                for cell in column:
+                    try:
+                        if len(str(cell.value)) > max_length:
+                            max_length = len(str(cell.value))
+                    except:
+                        pass
+                adjusted_width = min(max_length + 2, 100)
+                worksheet.column_dimensions[column_letter].width = adjusted_width
+    
+    bio.seek(0)
+    return bio
+
 # Custom CSS for Tyler Technologies branding
 st.markdown("""
 <style>
+    /* Wider layout */
+    .block-container {
+        max-width: 1200px;
+        padding: 2rem 1rem;
+    }
+    
     /* Main header styling */
     .main > div {
         padding-top: 2rem;
@@ -333,12 +436,38 @@ st.markdown("""
     .stDownloadButton > button:hover {
         background-color: #003F87;
     }
+    
+    /* Tab styling */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 24px;
+    }
+    
+    .stTabs [data-baseweb="tab"] {
+        font-weight: 500;
+        color: #003F87;
+    }
+    
+    .stTabs [aria-selected="true"] {
+        color: #0075C9;
+    }
 </style>
 """, unsafe_allow_html=True)
 
 st.title("Program Process Analyzer & Overlap Detector")
 st.markdown("**Tyler Technologies** - Government Process Optimization Tool")
 st.markdown("---")
+
+# Initialize session state
+if 'analysis_complete' not in st.session_state:
+    st.session_state.analysis_complete = False
+if 'program_processes' not in st.session_state:
+    st.session_state.program_processes = {}
+if 'overlap_analysis' not in st.session_state:
+    st.session_state.overlap_analysis = ""
+if 'analyses' not in st.session_state:
+    st.session_state.analyses = []
+if 'process_overlap_data' not in st.session_state:
+    st.session_state.process_overlap_data = {}
 
 uploaded_file = st.file_uploader("Upload Excel Spreadsheet of Programs", type=['xlsx'])
 
@@ -435,6 +564,11 @@ if uploaded_file:
         # Create process overlap analysis data
         process_overlap_data = analyze_process_overlaps(program_processes)
         
+        # Store results in session state
+        st.session_state.analysis_complete = True
+        st.session_state.program_processes = program_processes
+        st.session_state.process_overlap_data = process_overlap_data
+        
         # Visualizations
         st.header("Process Overlap Visualizations")
         
@@ -487,6 +621,7 @@ if uploaded_file:
         )
 
         overlap_analysis = overlap_response.choices[0].message.content
+        st.session_state.overlap_analysis = overlap_analysis
         
         st.header("Process Overlap Analysis")
         st.markdown(overlap_analysis)
@@ -541,114 +676,40 @@ if uploaded_file:
             progress_bar.progress((i+1)/len(df))
 
         st.success("All analyses generated!")
+        
+        # Store results in session state
+        st.session_state.analyses = analyses
 
+    # Display results if analysis is complete
+    if st.session_state.analysis_complete:
         # Display individual analyses
         st.header("Individual Program Analyses")
-        for item in analyses:
+        for item in st.session_state.analyses:
             with st.expander(f"Analysis for {item['Program']}"):
                 st.markdown(item['Analysis'])
 
-        # Export to Word
-        def create_word_doc(program_processes, overlap_analysis, analyses, process_overlap_data):
-            doc = Document()
-            doc.add_heading('Program Process Analysis Report', 0)
-            
-            # Add process overlap analysis first
-            doc.add_heading('Process Overlap Analysis', level=1)
-            doc.add_paragraph(overlap_analysis)
-            doc.add_page_break()
-            
-            # Add process summary
-            doc.add_heading('Process Summary by Program', level=1)
-            for program, processes in program_processes.items():
-                doc.add_heading(program, level=2)
-                for proc in processes:
-                    doc.add_paragraph(f"• {proc['process_name']} ({proc['process_type']})")
-                    doc.add_paragraph(f"  {proc['description']}", style='Normal')
-            doc.add_page_break()
-            
-            # Add individual analyses
-            doc.add_heading('Individual Program Efficiency Analyses', level=1)
-            for item in analyses:
-                doc.add_heading(item['Program'], level=2)
-                doc.add_paragraph(item['Analysis'])
-                doc.add_page_break()
-            
-            bio = BytesIO()
-            doc.save(bio)
-            bio.seek(0)
-            return bio
+        # Download section - always available after analysis
+        st.markdown("---")
+        st.header("Download Reports")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            word_file = create_word_doc(st.session_state.program_processes, 
+                                       st.session_state.overlap_analysis, 
+                                       st.session_state.analyses, 
+                                       st.session_state.process_overlap_data)
+            st.download_button("Download Complete Word Report", 
+                             word_file, 
+                             "Program_Process_Analysis_Report.docx",
+                             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
 
-        word_file = create_word_doc(program_processes, overlap_analysis, analyses, process_overlap_data)
-        st.download_button("Download Complete Word Report", word_file, "Program_Process_Analysis_Report.docx")
-
-        # Export to Excel with overlap analysis
-        def create_excel_file(program_processes, overlap_analysis, analyses, process_overlap_data):
-            bio = BytesIO()
-            with pd.ExcelWriter(bio, engine='openpyxl') as writer:
-                # Sheet 1: Process Summary
-                process_data = []
-                for program, processes in program_processes.items():
-                    for proc in processes:
-                        process_data.append({
-                            'Program': program,
-                            'Process Name': proc['process_name'],
-                            'Process Type': proc['process_type'],
-                            'Description': proc['description']
-                        })
-                
-                if process_data:
-                    process_df = pd.DataFrame(process_data)
-                    process_df.to_excel(writer, index=False, sheet_name='Process Summary')
-                
-                # Sheet 2: Process Overlap Matrix
-                overlap_matrix_df = create_overlap_matrix_data(process_overlap_data, program_processes)
-                overlap_matrix_df.to_excel(writer, sheet_name='Process Overlap Matrix')
-                
-                # Sheet 3: Overlap Details
-                overlap_details = []
-                for (prog1, prog2), similarity_data in process_overlap_data.items():
-                    if similarity_data['similarity_score'] > 0.3:  # Threshold for relevance
-                        for match in similarity_data['matching_processes']:
-                            overlap_details.append({
-                                'Program 1': prog1,
-                                'Program 2': prog2,
-                                'Process Type': match['process_type'],
-                                'Process 1': match['process1'],
-                                'Process 2': match['process2'],
-                                'Similarity Score': round(similarity_data['similarity_score'], 2),
-                                'Consolidation Opportunity': 'High' if similarity_data['similarity_score'] > 0.7 else 'Medium'
-                            })
-                
-                if overlap_details:
-                    overlap_details_df = pd.DataFrame(overlap_details)
-                    overlap_details_df.to_excel(writer, index=False, sheet_name='Overlap Details')
-                
-                # Sheet 4: Overlap Analysis Text
-                overlap_df = pd.DataFrame([{'Overlap Analysis': overlap_analysis}])
-                overlap_df.to_excel(writer, index=False, sheet_name='Overlap Analysis')
-                
-                # Sheet 5: Individual Analyses
-                analyses_df = pd.DataFrame(analyses)
-                analyses_df.to_excel(writer, index=False, sheet_name='Program Analyses')
-                
-                # Auto-adjust column widths
-                for sheet_name in writer.sheets:
-                    worksheet = writer.sheets[sheet_name]
-                    for column in worksheet.columns:
-                        max_length = 0
-                        column_letter = column[0].column_letter
-                        for cell in column:
-                            try:
-                                if len(str(cell.value)) > max_length:
-                                    max_length = len(str(cell.value))
-                            except:
-                                pass
-                        adjusted_width = min(max_length + 2, 100)
-                        worksheet.column_dimensions[column_letter].width = adjusted_width
-            
-            bio.seek(0)
-            return bio
-
-        excel_file = create_excel_file(program_processes, overlap_analysis, analyses, process_overlap_data)
-        st.download_button("Download Complete Excel Report", excel_file, "Program_Process_Analysis_Report.xlsx")
+        with col2:
+            excel_file = create_excel_file(st.session_state.program_processes, 
+                                         st.session_state.overlap_analysis, 
+                                         st.session_state.analyses, 
+                                         st.session_state.process_overlap_data)
+            st.download_button("Download Complete Excel Report", 
+                             excel_file, 
+                             "Program_Process_Analysis_Report.xlsx",
+                             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
