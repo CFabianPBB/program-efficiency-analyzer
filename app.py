@@ -75,6 +75,24 @@ def create_overlap_matrix(overlap_data, program_processes):
     programs = list(program_processes.keys())
     n_programs = len(programs)
     
+    # For large datasets, show only the most connected programs
+    if n_programs > 50:
+        st.warning(f"Showing top 50 most connected programs out of {n_programs} for clarity")
+        
+        # Calculate connection scores for each program
+        connection_scores = {}
+        for prog in programs:
+            score = 0
+            for (p1, p2), data in overlap_data.items():
+                if (prog == p1 or prog == p2) and data['similarity_score'] > 0.3:
+                    score += data['similarity_score']
+            connection_scores[prog] = score
+        
+        # Get top 50 most connected programs
+        top_programs = sorted(connection_scores.items(), key=lambda x: x[1], reverse=True)[:50]
+        programs = [p[0] for p in top_programs]
+        n_programs = len(programs)
+    
     # Create similarity matrix
     matrix = [[0] * n_programs for _ in range(n_programs)]
     
@@ -88,24 +106,32 @@ def create_overlap_matrix(overlap_data, program_processes):
                     matrix[i][j] = similarity
                     matrix[j][i] = similarity
     
-    # Create heatmap
+    # Create heatmap with better sizing for large datasets
+    height = max(600, min(1200, n_programs * 15))  # Dynamic height based on programs
+    
+    # Truncate long program names for display
+    display_programs = [p[:30] + "..." if len(p) > 30 else p for p in programs]
+    
     fig = go.Figure(data=go.Heatmap(
         z=matrix,
-        x=programs,
-        y=programs,
+        x=display_programs,
+        y=display_programs,
         colorscale=[[0, '#FFFFFF'], [0.5, TYLER_LIGHT_BLUE], [1, TYLER_BLUE]],
         text=[[f'{val:.2f}' for val in row] for row in matrix],
         texttemplate='%{text}',
-        textfont={"size": 10},
-        colorbar=dict(title="Similarity Score")
+        textfont={"size": 8},
+        colorbar=dict(title="Similarity Score"),
+        hoverongaps=False
     ))
     
     fig.update_layout(
-        title="Process Overlap Matrix",
+        title="Process Overlap Matrix (Top Connected Programs)" if n_programs == 50 else "Process Overlap Matrix",
         xaxis_title="Programs",
         yaxis_title="Programs",
-        height=600,
-        xaxis={'tickangle': -45}
+        height=height,
+        xaxis={'tickangle': -90, 'tickfont': {'size': 10}},
+        yaxis={'tickfont': {'size': 10}},
+        margin=dict(l=200, r=50, t=50, b=200)  # More margin for labels
     )
     
     st.plotly_chart(fig, use_container_width=True)
@@ -141,23 +167,49 @@ def create_process_type_chart(program_processes):
 
 def create_network_graph(overlap_data, program_processes):
     """Create a network graph showing program connections based on process overlap"""
+    programs = list(program_processes.keys())
+    
+    # For large datasets, filter to show only significant connections
+    if len(programs) > 100:
+        st.warning("Showing only programs with significant overlaps (>0.5 similarity) for clarity")
+        min_similarity = 0.5
+    else:
+        min_similarity = 0.3
+    
     # Create network graph
     G = nx.Graph()
     
-    # Add nodes (programs)
-    programs = list(program_processes.keys())
-    for program in programs:
+    # Find programs that have significant connections
+    connected_programs = set()
+    for (prog1, prog2), data in overlap_data.items():
+        if data['similarity_score'] > min_similarity:
+            connected_programs.add(prog1)
+            connected_programs.add(prog2)
+    
+    # Add only connected programs as nodes
+    for program in connected_programs:
         G.add_node(program)
     
     # Add edges based on similarity
     edge_trace_list = []
     
     for (prog1, prog2), data in overlap_data.items():
-        if data['similarity_score'] > 0.3:  # Only show significant overlaps
+        if data['similarity_score'] > min_similarity and prog1 in connected_programs and prog2 in connected_programs:
             G.add_edge(prog1, prog2, weight=data['similarity_score'])
     
-    # Get positions for nodes
-    pos = nx.spring_layout(G, k=3, iterations=50)
+    if len(G.nodes()) == 0:
+        st.info("No programs with significant overlaps found. Try adjusting the similarity threshold.")
+        return
+    
+    # Use a layout that handles large graphs better
+    try:
+        if len(G.nodes()) > 50:
+            pos = nx.kamada_kawai_layout(G)
+        else:
+            pos = nx.spring_layout(G, k=3, iterations=50)
+    except:
+        # Fallback to circular layout if other layouts fail
+        pos = nx.circular_layout(G)
     
     # Create edge traces
     for edge in G.edges(data=True):
@@ -168,9 +220,10 @@ def create_network_graph(overlap_data, program_processes):
         edge_trace = go.Scatter(
             x=[x0, x1, None],
             y=[y0, y1, None],
-            line=dict(width=weight*5, color=TYLER_LIGHT_BLUE),
+            line=dict(width=weight*3, color=TYLER_LIGHT_BLUE),
             hoverinfo='none',
-            mode='lines'
+            mode='lines',
+            showlegend=False
         )
         edge_trace_list.append(edge_trace)
     
@@ -178,42 +231,64 @@ def create_network_graph(overlap_data, program_processes):
     node_x = []
     node_y = []
     node_text = []
+    node_connections = []
     
     for node in G.nodes():
         x, y = pos[node]
         node_x.append(x)
         node_y.append(y)
-        node_text.append(node)
+        # Truncate long names and add connection count
+        truncated_name = node[:25] + "..." if len(node) > 25 else node
+        connections = len(list(G.neighbors(node)))
+        node_text.append(f"{truncated_name}<br>({connections} connections)")
+        node_connections.append(connections)
+    
+    # Size nodes based on number of connections
+    node_sizes = [20 + (conn * 5) for conn in node_connections]
     
     node_trace = go.Scatter(
         x=node_x,
         y=node_y,
         mode='markers+text',
-        text=node_text,
+        text=[n.split('<br>')[0] for n in node_text],  # Show only name as label
+        hovertext=node_text,  # Show full info on hover
         textposition="top center",
         hoverinfo='text',
         marker=dict(
-            size=30,
-            color=TYLER_BLUE,
+            size=node_sizes,
+            color=node_connections,
+            colorscale=[[0, TYLER_LIGHT_BLUE], [1, TYLER_BLUE]],
+            colorbar=dict(title="Connections"),
             line_width=2,
             line_color='white'
-        )
+        ),
+        textfont=dict(size=8)
     )
     
     # Create figure
     fig = go.Figure(data=edge_trace_list + [node_trace])
     
     fig.update_layout(
-        title="Program Process Overlap Network",
+        title=f"Program Process Overlap Network ({len(G.nodes())} programs shown)",
         showlegend=False,
         hovermode='closest',
         margin=dict(b=20,l=5,r=5,t=40),
         xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
         yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-        height=600
+        height=800,
+        plot_bgcolor='white'
     )
     
     st.plotly_chart(fig, use_container_width=True)
+    
+    # Add summary statistics
+    st.info(f"""
+    Network Statistics:
+    - Programs shown: {len(G.nodes())} (out of {len(programs)} total)
+    - Connections shown: {len(G.edges())}
+    - Minimum similarity threshold: {min_similarity}
+    - Most connected program: {max(node_connections)} connections
+    """)
 
 def create_cross_department_analysis(overlap_data, program_processes):
     """Create analysis of cross-departmental process overlaps"""
@@ -591,7 +666,7 @@ if uploaded_file:
                 List the major processes within this program. For each process:
                 1. Give it a clear, concise name
                 2. Provide a brief description (1-2 sentences)
-                3. Identify the process type (e.g., Application Processing, Data Management, Customer Service, Financial Management, Compliance Monitoring, etc.)
+                3. Identify the process type (e.g., process types like inspections, enforcement, auditing, permitting and licensing, investigations, application intake, application review, payment handling, procurement and purchasing, records management, customer service, public notification, public engagement, benefits distribution, grant administration, data collection and reporting, strategic planning, budget development, performance management, policy and ordinance development, etc.)
 
                 Format your response as a JSON array like this:
                 [
